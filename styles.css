@@ -251,6 +251,12 @@ a {
   color: rgba(255, 255, 255, 0.82);
   white-space: nowrap;
 }
+.module-title .module-prefix {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
 .module-title strong {
   font-size: 15px;
   color: #fff;
@@ -652,7 +658,7 @@ a {
   height: auto;
   max-width: 100%;
   vertical-align: -0.22em;
-  margin: 0 0.04em;
+  margin: 0 0.06em 0 0.14em;
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -663,6 +669,22 @@ a {
 .math-block img {
   display: inline-block;
   width: calc(var(--mw, 200) * 1em * var(--math-scale, 0.115));
+  height: auto;
+  max-width: 100%;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.table-block {
+  margin: 18px 0;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.table-block img {
+  display: block;
+  width: calc(var(--mw, 200) * 1em * var(--math-scale, 0.115) * 1.25);
   height: auto;
   max-width: 100%;
   user-select: none;

@@ -626,7 +626,8 @@ function renderTest() {
         <span class="brand-mark">S</span> <span class="brand-text">SAT Practice</span>
       </button>
       <div class="module-title">
-        <strong>${escapeHtml(test.test || 'Math')}</strong><span>·</span><span>Module 1</span>
+        <span class="module-prefix">Section 1, Module 1:</span>
+        <strong>${escapeHtml(test.test || 'Math')}</strong>
       </div>
       <div class="topbar-spacer"></div>
       <div class="topbar-right">
@@ -975,6 +976,25 @@ function renderPrompt(container, q) {
       img.style.setProperty('--mw', String(block.w));
       figure.append(img);
       container.append(figure);
+    } else if (block.type === 'table') {
+      const figure = document.createElement('figure');
+      figure.className = 'table-block';
+      const img = document.createElement('img');
+      img.src = block.src;
+      img.alt = 'Table from the PDF';
+      img.draggable = false;
+      img.style.setProperty('--mh', String(block.h));
+      img.style.setProperty('--mw', String(block.w));
+      figure.append(img);
+      container.append(figure);
+    } else if (block.type === 'list') {
+      const listEl = document.createElement(block.ordered ? 'ol' : 'ul');
+      for (const itemTokens of block.items) {
+        const li = document.createElement('li');
+        renderTokens(li, itemTokens);
+        listEl.append(li);
+      }
+      container.append(listEl);
     }
   }
 }

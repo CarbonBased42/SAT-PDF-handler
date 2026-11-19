@@ -26,6 +26,16 @@ const INK_THRESHOLD = 245; // luminance below this counts as ink
 const TRIM_PAD = 2; // pixels of breathing room around trimmed ink
 const LINE_TOLERANCE = 2.4; // baseline tolerance when grouping text items
 
+/* Table detection thresholds (render scale 3 = 216 dpi) */
+const TABLE_MIN_H_RUN_PX = 120; // min horizontal rule length in px
+const TABLE_MIN_V_RUN_PX = 45; // min vertical rule length in px
+const TABLE_MERGE_TOL_PX = 2.5; // px tolerance for merging adjacent rule pixels
+const TABLE_MIN_RULES = 2; // min horizontal rules to qualify as a table
+const TABLE_MIN_HEIGHT_PT = 25; // min table height in pt
+const TABLE_MIN_WIDTH_PT = 55; // min table width in pt
+const TABLE_V_RULE_SPAN_RATIO = 0.7; // vertical rule must cover this fraction of table height
+const TABLE_MIN_TEXT_ITEMS = 2; // min non-space text items inside table rect
+
 export async function parsePdf(input, { onProgress, title } = {}) {
   const data = input instanceof Uint8Array ? input : new Uint8Array(input);
   const doc = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
@@ -46,6 +56,14 @@ export async function parsePdf(input, { onProgress, title } = {}) {
     const cropper = new Cropper(page, viewport);
     const bands = splitQuestionBands(items);
 
+    // Detect ruled table regions once per page (render is already cached by the cropper).
+    let tableRects = [];
+    try {
+      tableRects = await cropper.detectTableRects();
+    } catch {
+      // Table detection is optional; parsing continues without it.
+    }
+
     for (const band of bands) {
       try {
         const q = await parseQuestionBand({
@@ -55,6 +73,7 @@ export async function parsePdf(input, { onProgress, title } = {}) {
           band,
           pageNum,
           number: questions.length + 1,
+          tableRects,
         });
         if (q) questions.push(q);
       } catch (err) {
@@ -109,7 +128,7 @@ function splitQuestionBands(items) {
   });
 }
 
-async function parseQuestionBand({ page, viewport, cropper, band, pageNum, number }) {
+async function parseQuestionBand({ page, viewport, cropper, band, pageNum, number, tableRects = [] }) {
   const lines = groupLines(band.items);
   if (!lines.length) return null;
 
@@ -174,6 +193,7 @@ async function parseQuestionBand({ page, viewport, cropper, band, pageNum, numbe
     cropper,
     left: contentLeft,
     right: contentRight,
+    tableRects,
   });
 
   const choices = await buildChoices({
@@ -223,7 +243,7 @@ async function parseQuestionBand({ page, viewport, cropper, band, pageNum, numbe
    Prompt & choice construction
    -------------------------------------------------------------------------- */
 
-async function buildPrompt({ lines, headingLine, contentBottom, cropper, left, right }) {
+async function buildPrompt({ lines, headingLine, contentBottom, cropper, left, right, tableRects = [] }) {
   const blocks = [];
   let para = [];
   const flush = () => {
@@ -243,22 +263,107 @@ async function buildPrompt({ lines, headingLine, contentBottom, cropper, left, r
   const displayGap = Math.max(23, medGap * 1.72);
   const paraGap = Math.max(medGap * 1.34, 17);
 
+  // Sort table rects top-to-bottom (PDF y: larger yTop = higher on page).
+  const tables = [...tableRects].sort((a, b) => b.yTop - a.yTop);
+  let tableIdx = 0;
+
+  // Returns the table rect whose band contains the given PDF y baseline, or null.
+  const findTableAt = (y) => {
+    for (const t of tables) {
+      if (y >= t.yBottom - 1 && y <= t.yTop + 1) return t;
+    }
+    return null;
+  };
+
+  // Returns true if the display-crop rect intersects any table band.
+  const cropHitsTable = (yTop, yBottom) => {
+    return tables.some((t) => yTop > t.yBottom - 2 && yBottom < t.yTop + 2);
+  };
+
+  // Detect numbered-list statement lines (e.g. "1.", "2.", "3.") indented past the question margin.
+  const isListMarker = (line) => {
+    const text = cleanLineText(line);
+    return /^\d+[.)]\s/.test(text) && line.x0 > left + 6;
+  };
+
   let prev = headingLine;
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const line = lines[i];
     const next = lines[i + 1] || null;
+    const table = findTableAt(line.y);
+
+    if (table) {
+      flush();
+      if (tableIdx < tables.length && tables[tableIdx] === table) {
+        const crop = await cropper.crop({
+          x0: Math.max(0, table.x0 - 2),
+          x1: table.x1 + 2,
+          yTop: table.yTop + 2,
+          yBottom: table.yBottom - 2,
+        });
+        if (crop) blocks.push({ type: 'table', ...crop });
+        tableIdx++;
+      }
+      while (i < lines.length && findTableAt(lines[i].y)) i++;
+      prev = line;
+      continue;
+    }
+
+    // Detect numbered-list runs (1., 2., 3. ...).
+    if (isListMarker(line)) {
+      const listItems = [];
+      // Start a new list item at this marker line.
+      let currentTokens = await tokensFromLine({
+        line, prevLine: prev, nextLine: next, cropper, left, right,
+      });
+      if (currentTokens.length) listItems.push(currentTokens);
+      i++;
+      // Collect continuation lines until the next marker, table band, or end.
+      while (i < lines.length && !findTableAt(lines[i].y) && !isListMarker(lines[i])) {
+        const cont = lines[i];
+        const contTokens = await tokensFromLine({
+          line: cont, prevLine: null, nextLine: null, cropper, left, right,
+        });
+        if (contTokens.length) {
+          if (listItems[listItems.length - 1].length) {
+            const last = listItems[listItems.length - 1];
+            if (last[last.length - 1] && last[last.length - 1].t === 'text') {
+              last.push({ t: 'space' });
+            }
+          }
+          listItems.push(contTokens);
+        }
+        prev = cont;
+        i++;
+      }
+      // Flush pending paragraph before the list.
+      flush();
+      const listBlock = { type: 'list', ordered: true, items: listItems.map((t) => trimTokens(t)).filter((t) => t.length) };
+      // Merge with previous list block if consecutive (same ordered type).
+      const lastBlock = blocks[blocks.length - 1];
+      if (lastBlock && lastBlock.type === 'list' && lastBlock.ordered === listBlock.ordered) {
+        lastBlock.items.push(...listBlock.items);
+      } else {
+        blocks.push(listBlock);
+      }
+      prev = line;
+      continue;
+    }
 
     if (prev) {
       const gap = prev.y - line.y;
       if (gap > displayGap) {
         flush();
-        const crop = await cropper.crop({
-          x0: left,
-          x1: right,
-          yTop: prev.y - 4,
-          yBottom: line.y + 10,
-        });
-        if (crop) blocks.push({ type: 'math', ...crop });
+        if (!cropHitsTable(prev.y - 4, line.y + 10)) {
+          const crop = await cropper.crop({
+            x0: left,
+            x1: right,
+            yTop: prev.y - 4,
+            yBottom: line.y + 10,
+          });
+          if (crop) blocks.push({ type: 'math', ...crop });
+        }
       } else if (gap > paraGap && para.length) {
         flush();
       }
@@ -277,19 +382,22 @@ async function buildPrompt({ lines, headingLine, contentBottom, cropper, left, r
       para.push(...tokens);
     }
     prev = line;
+    i++;
   }
   flush();
 
   // A figure or equation may sit below the final prose line.
   if (prev && contentBottom < prev.y - 26) {
     const scanBottom = Math.max(contentBottom, prev.y - 300);
-    const crop = await cropper.crop({
-      x0: left,
-      x1: right,
-      yTop: prev.y - 6,
-      yBottom: scanBottom,
-    });
-    if (crop) blocks.push({ type: 'math', ...crop });
+    if (!cropHitsTable(prev.y - 6, scanBottom)) {
+      const crop = await cropper.crop({
+        x0: left,
+        x1: right,
+        yTop: prev.y - 6,
+        yBottom: scanBottom,
+      });
+      if (crop) blocks.push({ type: 'math', ...crop });
+    }
   }
 
   return blocks;
@@ -406,10 +514,20 @@ const STANDALONE_WORDS = new Set([
 ]);
 
 function repairHairSpaces(text) {
-  return text.replace(/([A-Za-z]{2,}) +([A-Za-z]{2,})/g, (match, left, right) => {
+  // Collapse micro-spaces inside split words: "repor t" -> "report",
+  // "ver tex" -> "vertex", "propor tional" -> "proportional".
+  // Two-or-more letters on both sides:
+  let out = text.replace(/([A-Za-z]{2,}) +([A-Za-z]{2,})/g, (match, left, right) => {
     if (STANDALONE_WORDS.has(left.toLowerCase())) return match;
     return left + right;
   });
+  // One-letter right fragment: "bir th" -> "birth", "repor t" -> "report"
+  // (left side must be 3+ letters to avoid breaking "a t" style phrases).
+  out = out.replace(/([A-Za-z]{3,}) +([A-Za-z])\b/g, (match, left, right) => {
+    if (STANDALONE_WORDS.has(left.toLowerCase())) return match;
+    return left + right;
+  });
+  return out;
 }
 
 function inlineRect(x0, x1, line, prevLine, nextLine) {
@@ -473,7 +591,7 @@ function extractMetadata(lines, headerLine, headingLine, band) {
       cursor = x + it.width;
       lastY = y;
     }
-    out[cols[i].name] = text.replace(/\s+/g, ' ').trim();
+    out[cols[i].name] = repairHairSpaces(text.replace(/\s+/g, ' ').trim());
   }
   return out;
 }
@@ -574,7 +692,7 @@ function groupLines(items) {
 }
 
 function cleanLineText(line) {
-  return (line.text || '').replace(/\s+/g, ' ').trim();
+  return repairHairSpaces((line.text || '').replace(/\s+/g, ' ').trim());
 }
 
 function trimTokens(tokens) {
@@ -716,6 +834,136 @@ class Cropper {
       w: cw / this.scale,
       h: ch / this.scale,
     };
+  }
+
+  /* --------------------------------------------------------------------------
+     Table detection — rendered-pixel line analysis.
+     Detects ruled table regions by finding long horizontal rules plus vertical
+     rules inside them. Returns rects in PDF points (y increases upward).
+     -------------------------------------------------------------------------- */
+
+  async detectTableRects() {
+    await this.ensure();
+    const { width: W, height: H } = this.canvas;
+    const image = this.ctx.getImageData(0, 0, W, H).data;
+
+    const dark = new Uint8Array(W * H);
+    for (let i = 0, j = 0; i < image.length; i += 4, j++) {
+      const lum =
+        0.299 * image[i] + 0.587 * image[i + 1] + 0.114 * image[i + 2];
+      dark[j] = lum < INK_THRESHOLD ? 1 : 0;
+    }
+
+    // Horizontal runs (potential table top/bottom/internal rules).
+    const hRuns = [];
+    for (let y = 0; y < H; y++) {
+      let run = 0, start = 0;
+      for (let x = 0; x <= W; x++) {
+        const on = x < W && dark[y * W + x];
+        if (on) { if (!run) start = x; run++; }
+        else {
+          if (run >= TABLE_MIN_H_RUN_PX) hRuns.push({ y, x1: start, x2: start + run, len: run });
+          run = 0;
+        }
+      }
+    }
+
+    // Vertical runs (potential table column dividers).
+    const vRuns = [];
+    for (let x = 0; x < W; x++) {
+      let run = 0, start = 0;
+      for (let y = 0; y <= H; y++) {
+        const on = y < H && dark[y * W + x];
+        if (on) { if (!run) start = y; run++; }
+        else {
+          if (run >= TABLE_MIN_V_RUN_PX) vRuns.push({ x, y1: start, y2: start + run, len: run });
+          run = 0;
+        }
+      }
+    }
+
+    // Merge adjacent rows/cols into single rules (borders are 2-3 px thick).
+    const merge = (runs, key, a, b, tol) => {
+      runs.sort((p, q) => p[key] - q[key]);
+      const out = [];
+      for (const r of runs) {
+        const g = out.find((g) => Math.abs(g[key] - r[key]) <= tol && Math.min(g[b], r[b]) - Math.max(g[a], r[a]) > -8);
+        if (!g) out.push({ ...r, n: 1 });
+        else {
+          g[a] = Math.min(g[a], r[a]);
+          g[b] = Math.max(g[b], r[b]);
+          g.n++;
+          g[key] = (g[key] * (g.n - 1) + r[key]) / g.n;
+        }
+      }
+      return out;
+    };
+    const hs = merge(hRuns, 'y', 'x1', 'x2', TABLE_MERGE_TOL_PX).filter((r) => r.n <= 4);
+    const vs = merge(vRuns, 'x', 'y1', 'y2', TABLE_MERGE_TOL_PX).filter((r) => r.n <= 4);
+
+    // Group ONLY horizontal rules with similar x-extents — this is what
+    // distinguishes ruled table borders from full-width header/footer rules.
+    hs.sort((a, b) => a.y - b.y);
+    const groups = [];
+    for (const h of hs) {
+      let placed = false;
+      for (const g of groups) {
+        const last = g.rules[g.rules.length - 1];
+        const vgap = h.y - last.y;
+        const overlap = Math.min(g.x2, h.x2) - Math.max(g.x1, h.x1);
+        const minW = Math.min(g.x2 - g.x1, h.x2 - h.x1);
+        const widthDiff = Math.abs((g.x2 - g.x1) - (h.x2 - h.x1));
+        // Allow up to 40% width difference — table top borders can be wider
+        // than internal row borders, but header/footer rules are much wider.
+        const xSimilar = overlap >= 0.90 * minW && widthDiff <= 0.40 * minW;
+        if (vgap >= 8 && vgap <= 300 && xSimilar) {
+          g.rules.push(h);
+          g.x1 = Math.min(g.x1, h.x1);
+          g.x2 = Math.max(g.x2, h.x2);
+          g.y1 = Math.min(g.y1, h.y);
+          g.y2 = Math.max(g.y2, h.y);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) groups.push({ rules: [h], x1: h.x1, x2: h.x2, y1: h.y, y2: h.y });
+    }
+
+    const rects = [];
+    const pageHeightPt = this.pageHeight;
+    for (const g of groups) {
+      if (g.rules.length < TABLE_MIN_RULES) continue;
+      if ((g.y2 - g.y1) / this.scale < TABLE_MIN_HEIGHT_PT) continue;
+      if ((g.x2 - g.x1) / this.scale < TABLE_MIN_WIDTH_PT) continue;
+
+      const yTopPt = pageHeightPt - g.y2 / this.scale;
+      const yBottomPt = pageHeightPt - g.y1 / this.scale;
+      if (g.x2 - g.x1 > this.pageWidth * 0.85) continue;
+
+      rects.push({
+        x0: +(g.x1 / this.scale - 1).toFixed(1),
+        x1: +(g.x2 / this.scale + 1).toFixed(1),
+        yTop: +(pageHeightPt - g.y1 / this.scale).toFixed(1),
+        yBottom: +(pageHeightPt - g.y2 / this.scale).toFixed(1),
+      });
+    }
+
+    // Merge overlapping rects.
+    const merged = [];
+    for (const r of rects.sort((a, b) => b.yTop - a.yTop)) {
+      const m = merged.find(
+        (m) => r.yTop <= m.yTop + 3 && r.yBottom >= m.yBottom - 3 && r.x0 >= m.x0 - 5 && r.x1 <= m.x1 + 5,
+      );
+      if (m) {
+        m.yTop = Math.max(m.yTop, r.yTop);
+        m.yBottom = Math.min(m.yBottom, r.yBottom);
+        m.x0 = Math.min(m.x0, r.x0);
+        m.x1 = Math.max(m.x1, r.x1);
+      } else {
+        merged.push({ ...r });
+      }
+    }
+    return merged;
   }
 
   dispose() {
