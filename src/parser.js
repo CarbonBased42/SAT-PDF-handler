@@ -495,7 +495,40 @@ async function tokensFromLine({ line, prevLine, nextLine, cropper, left, right }
     cursor = Math.max(cursor, x1);
   }
 
-  return trimTokens(tokens);
+  let result = trimTokens(tokens);
+
+  // Merge cross-item hair-space splits (e.g. "shir" + " " + "ts" → "shirts").
+  // repairHairSpaces() only operates within a single text item, so splits
+  // across separate items need this post-processing step.
+  for (let k = 0; k < result.length - 2; k++) {
+    if (
+      result[k].t === 'text' &&
+      result[k + 1].t === 'space' &&
+      result[k + 2].t === 'text'
+    ) {
+      const left = result[k].v.trimEnd();
+      const right = result[k + 2].v.trimStart();
+      if (
+        left.length >= 2 &&
+        right.length >= 1 &&
+        !STANDALONE_WORDS.has(left.toLowerCase()) &&
+        /^[A-Za-z]+$/.test(left) &&
+        /^[A-Za-z]+$/.test(right)
+      ) {
+        const prefix = result[k].v.slice(0, result[k].v.length - left.length);
+        const suffix = result[k + 2].v.slice(right.length);
+        result[k].v = prefix + left + right + suffix;
+        result.splice(k + 1, 2);
+        // Re-check at this position (don't advance k)
+      } else {
+        k++;
+      }
+    } else {
+      k++;
+    }
+  }
+
+  return result;
 }
 
 // The question-bank exporter sometimes writes a hair-space glyph between two
