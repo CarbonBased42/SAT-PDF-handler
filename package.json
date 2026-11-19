@@ -1,0 +1,11 @@
+{
+  "name": "sat-bluebook",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn SAT question-bank PDFs into a Bluebook-style interactive practice test.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}

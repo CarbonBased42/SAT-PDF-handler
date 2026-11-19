@@ -1,0 +1,23 @@
+import { chromium } from 'playwright-core';
+
+const browser = await chromium.launch({ executablePath: '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
+const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+const errors = [];
+page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+page.on('pageerror', (e) => errors.push('pageerror: ' + e.message + '\n' + e.stack));
+await page.goto('http://127.0.0.1:4173/', { waitUntil: 'networkidle' });
+await page.locator('#load-sample').click();
+await page.waitForSelector('.question-card');
+await page.locator('.choice >> nth=0').click();
+await page.locator('#review-btn').click();
+await page.waitForSelector('.review-list');
+console.log('results ok');
+await page.locator('#back-to-test').click();
+await page.waitForTimeout(1500);
+console.log('url', page.url());
+console.log('app text head:', (await page.locator('#app').innerText()).slice(0, 300).replace(/\n/g, ' | '));
+console.log('question-card count:', await page.locator('.question-card').count());
+console.log('review rows:', await page.locator('.review-row').count());
+console.log('errors:', errors);
+await page.screenshot({ path: '/tmp/opencode/back.png', fullPage: true });
+await browser.close();
