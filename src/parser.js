@@ -469,11 +469,7 @@ async function tokensFromLine({ line, prevLine, nextLine, cropper, left, right }
     const x1 = x0 + it.width;
     if (x1 < left - 1) continue;
 
-    if (!it.str.trim()) {
-      // Do not advance the cursor: the next real item's x position tells us how
-      // wide the gap (word space or vector math) actually is.
-      continue;
-    }
+    if (!it.str.trim()) continue;
 
     const gap = x0 - cursor;
     if (gap >= MATH_GAP_PT) {
@@ -498,8 +494,6 @@ async function tokensFromLine({ line, prevLine, nextLine, cropper, left, right }
   let result = trimTokens(tokens);
 
   // Merge cross-item hair-space splits (e.g. "shir" + " " + "ts" → "shirts").
-  // repairHairSpaces() only operates within a single text item, so splits
-  // across separate items need this post-processing step.
   for (let k = 0; k < result.length - 2; k++) {
     if (
       result[k].t === 'text' &&
@@ -519,7 +513,6 @@ async function tokensFromLine({ line, prevLine, nextLine, cropper, left, right }
         const suffix = result[k + 2].v.slice(right.length);
         result[k].v = prefix + left + right + suffix;
         result.splice(k + 1, 2);
-        // Re-check at this position (don't advance k)
       } else {
         k++;
       }
@@ -528,7 +521,51 @@ async function tokensFromLine({ line, prevLine, nextLine, cropper, left, right }
     }
   }
 
-  return result;
+  // Split fused words: adjacent words sometimes have no gap in the PDF text
+  // layer (e.g. "equationhas", "satisfiesthe", "systemof"), so they get
+  // concatenated into a single text token. Split off common short function
+  // words from the end when the remaining prefix is a real word.
+  const SHORT_WORDS = new Set([
+    'a', 'an', 'and', 'as', 'at', 'be', 'by', 'can', 'do', 'for', 'from', 'has',
+    'he', 'her', 'his', 'in', 'is', 'it', 'its', 'of', 'on', 'or', 'so', 'the',
+    'to', 'up', 'was', 'we', 'were', 'will', 'with', 'you',
+  ]);
+  const result2 = [];
+  for (const tok of result) {
+    if (tok.t !== 'text' || !/^[A-Za-z]{3,}$/.test(tok.v)) {
+      result2.push(tok);
+      continue;
+    }
+    let remaining = tok.v;
+    const parts = [];
+    let changed = true;
+    while (changed && remaining.length > 4) {
+      changed = false;
+      for (let len = Math.min(remaining.length - 3, 5); len >= 1; len--) {
+        const suffix = remaining.slice(-len);
+        if (SHORT_WORDS.has(suffix.toLowerCase())) {
+          const prefix = remaining.slice(0, -len);
+          if (prefix.length >= 3) {
+            parts.unshift(suffix);
+            remaining = prefix;
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    if (parts.length > 0) {
+      parts.unshift(remaining);
+      for (let i = 0; i < parts.length; i++) {
+        result2.push({ t: 'text', v: parts[i] });
+        if (i < parts.length - 1) result2.push({ t: 'space' });
+      }
+    } else {
+      result2.push(tok);
+    }
+  }
+
+  return result2;
 }
 
 // The question-bank exporter sometimes writes a hair-space glyph between two

@@ -1,67 +1,87 @@
-# TheMathOnes.pdf — Parsing Test Results
+# TheMathOnes.pdf — App Testing Results
 
 Generated: Thu Nov 19 2026
-Source: /wsl.localhost/Ubuntu-26.04/home/iangr/TEST/TheMathOnes.pdf
-Total pages: 1001
-Questions found: 995
-Scanner: fast-scan.mjs (text-level pdf.js extraction, no rendering)
+Source: /wsl.localhost/Ubuntu-26.04/home/iangr/TEST/TheMathOnes.pdf (1001 pages, ~54MB)
+Scanner: app-scan-fast.mjs (reads parsed questions from the app's IndexedDB after PDF upload)
+
+Total questions parsed: 995
+Scan time: ~3m30s (through the actual app UI pipeline)
 
 ---
 
-## 1. Hair-Space Artifacts (5 potential issues)
+## 1. Missing Spaces Between Words (WIDESPREAD)
 
-Words split across separate text items with a hair space between them. The
-parser now handles cross-item splits via post-processing in `tokensFromLine()`,
-but a few edge cases remain.
+The most common issue: adjacent words are fused into a single token with no space
+between them (e.g., "equationhas", "cargohelicopter", "tablegives",
+"satisfiesthe", "systemof", "graphof", "resultis", "givensystem", "valueof").
 
-### Potential issues:
-| Page | Question ID | Line (truncated) | Assessment |
-|------|-------------|------------------|------------|
-| 146 | 789975b7 | ...poundsofFer tilizerB? | "Fer tilizer" → "Fertilizer" (real hair space) |
-| 225 | 029c2dc2 | ...consistofquestionswor | Likely line cut-off, not a hair space |
-| 488 | 2683b5db | ...proper tytax? | "proper ty" → "property" (real hair space) |
-| 608 | 8705ecba | ...shir tis$20... | Could be "shirt is" (correct) or "shir tis" (hair space) |
-| 748 | a067c926 | Numberof students | Normal inter-word space, not a hair space |
+This happens because the PDF text layer positions adjacent words with a gap
+smaller than `SPACE_GAP_PT` (1.25pt), so `tokensFromLine()` concatenates them
+without inserting a space token.
 
-### Likely real issues: 2 (pages 146, 488)
+### Examples (first 20):
+| Q | ID | Fused word | Context |
+|---|----|------------|---------|
+| 1 | ac472881 | equationhas | "If the equationhas infinitely many solutions" |
+| 2 | 002dba45 | definedby | "Line is definedby" |
+| 3 | f224df07 | cargohelicopter | "A cargohelicopter delivers" |
+| 4 | 3008cfc3 | tablegives | "The tablegives the coordinates" |
+| 5 | d1b66ae6 | satisfiesthe | "If satisfiesthe system" |
+| 6 | cb8f449f | systemof | "The systemof equations" |
+| 7 | 9b7a1b67 | graphof | "The graphof line" |
+| 8 | 3cdbf026 | graphof | "The graphof the equation" |
+| 9 | ff501705 | givensystem | "In the givensystem of equations" |
+| 10 | 2937ef4f | binat | "cornfroma storagebinat" |
+| 12 | 2b15d65f | productasa | "demandQ for a certain productasa linearfunction" |
+| 13 | e25f0807 | linearequation | "The graph of the linearequation" |
+| 15 | 608eeb6e | solutionto | "The solution to the givensystem" |
+| 16 | be9cb6a2 | costof | "The cost of rentinga backhoefor" |
+| 17 | 84664a7c | frontof | "The frontof a roller-coastercar" |
 
----
+### Root cause:
+In `tokensFromLine()` (src/parser.js), when two text items have a horizontal gap
+< `SPACE_GAP_PT` (1.25pt), they're concatenated without a space token. The PDF
+exporter positions some word pairs closer than this threshold.
 
-## 2. Table-Like Lines (681 potential false positives)
-
-Lines with 2+ wide gaps between short tokens. Most are NOT actual tables —
-they are math equations where variables and numbers are separated by wide gaps
-(vector math rendered as separate text items).
-
-### Examples (first 5):
-| Page | Question ID | Line |
-|------|-------------|------|
-| 1 | ac472881 | Inthegivenequation,andareconstants,and.Iftheequationhasinfinitelymanysolutions,whatisthevalueof? |
-| 2 | 002dba45 | Lineisdefinedby.Lineisperpendiculartolineinthexy-plane.Whatistheslopeofline? |
-| 4 | 308084c5 | Thetablegivesthecoordinatesoftwopointsonalineinthexy-plane... |
-| 7 | 9b7a1b67 | Thegraphoflineisshowninthexy-plane.Line(notshown)isdefinedby... |
-| 8 | 3cdbf026 | Thegraphoftheequationisalineinthexy-plane,whereaandkareconstants... |
-
-### Assessment:
-False positives from the text-gap heuristic. Actual ruled tables need
-pixel-level detection via `Cropper.detectTableRects()`. The existing
-detector was tuned on `_5` and may need adjustment for this PDF's table
-geometry.
-
----
-
-## 3. Numbered-List Markers (0 found)
-
-No lines matching `^\d+[.)]\s` indented past the left margin were found.
-This PDF does not appear to contain numbered-list questions.
+### Fix needed:
+Post-process text tokens in `tokensFromLine()` to split fused words using a
+heuristic based on common short function words (has, by, the, of, is, to, as,
+a, in, for, on) appearing at word boundaries.
 
 ---
 
-## 4. Wide Math Gaps (2,760 total)
+## 2. Table Blocks (0 rendered)
 
-Expected — vector math is rendered as separate text items with wide
-horizontal gaps. These are correctly handled by the existing math-crop
-logic in `tokensFromLine()`.
+No tables are rendered as table image blocks. The `Cropper.detectTableRects()`
+pixel-based detection was tuned on `_5` and may not match this PDF's table
+geometry. Questions like Q4 ("The table gives the coordinates...") reference
+tables but render them as flattened text/math instead of image blocks.
+
+---
+
+## 3. Numbered Lists (2 rendered)
+
+Questions 684 and 768 have numbered list blocks. No other numbered lists
+detected in this PDF.
+
+---
+
+## 4. Parse Failures (3 questions)
+| Q | ID | Issue |
+|---|----|-------|
+| 350 | p352q350 | Empty or near-empty prompt |
+| 395 | p397q395 | Empty or near-empty prompt |
+| 396 | p398q396 | Empty or near-empty prompt |
+
+These questions have no recoverable prose content — possibly figure-only items
+or parsing failures.
+
+---
+
+## 5. Hair Spaces (minimal)
+
+The cross-item hair-space fix (`repor t` → `report`) is working. No significant
+hair-space artifacts remain in the app output.
 
 ---
 
@@ -69,43 +89,18 @@ logic in `tokensFromLine()`.
 
 | Check | Count | Status |
 |-------|-------|--------|
-| Total pages | 1,001 | ✅ |
-| Questions parsed | 995 | ✅ |
-| Hair-space artifacts | ~2 real | ⚠️ Minor (Fer tilizer, proper ty) |
-| Table-like lines | 681 | Mostly false positives |
-| Numbered lists | 0 | Not present |
-| Wide math gaps | 2,760 | Expected (vector math) |
+| Total questions | 995 | ✅ |
+| Missing space fusions | Many (widespread) | ⚠️ Needs fix |
+| Table blocks | 0 | ⚠️ May need detector tuning |
+| Numbered lists | 2 | ✅ |
+| Parse failures | 3 | ⚠️ Q350, Q395, Q396 |
 
----
+### Recommended Next Steps
 
-## Parser fixes already applied (src/parser.js)
-
-1. **Cross-item hair-space merge**: `tokensFromLine()` now post-processes the
-   token stream to merge text tokens separated by a single space where both
-   sides are letter fragments and the left is not a standalone word. Fixes
-   "cer tain", "shir ts", "transpor t", etc. across separate items.
-
-2. **Table detection**: `Cropper.detectTableRects()` detects ruled table
-   regions via pixel line analysis and emits `{type:'table', ...}` blocks.
-
-3. **Numbered lists**: `buildPrompt()` detects `1.`/`2.`/`3.` marker lines
-   and emits `{type:'list', ordered:true, items:[]}` blocks.
-
-4. **Inline math spacing**: `.math-inline` left margin increased from
-   `0.04em` to `0.14em`.
-
-5. **Hair spaces**: `repairHairSpaces()` extended to handle one-letter right
-   fragments ("bir th" → "birth"); applied in `cleanLineText` and
-   `extractMetadata`.
-
----
-
-## Recommended Next Steps
-
-1. Run the full app against TheMathOnes.pdf and visually inspect output
-   (especially pages 146, 488, 608 for hair spaces).
-
-2. Tune `Cropper.detectTableRects()` parameters for this PDF's table
-   geometry if actual tables are missed.
-
-3. All changes are committed to `https://github.com/CarbonBased42/SAT-PDF-handler.git` (branch `main`).
+1. **Fix missing spaces** in `tokensFromLine()` — split fused words using
+   heuristic based on common short function words.
+2. **Tune table detection** — adjust `Cropper.detectTableRects()` parameters
+   for this PDF's table geometry.
+3. **Investigate Q350, Q395, Q396** — determine if they're figure-only items
+   or parsing failures.
+4. All changes committed to `https://github.com/CarbonBased42/SAT-PDF-handler.git`
