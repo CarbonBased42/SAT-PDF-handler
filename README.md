@@ -13,7 +13,7 @@ The app is fully static — no build step and no backend.
 node server.js          # http://localhost:4173
 ```
 
-Then open the page, choose a question-bank PDF, and start practising. Parsing
+Then open the page, choose a question-bank PDF, and start practicing. Parsing
 happens entirely in the browser; the PDF never leaves your device. Parsed tests
 are cached locally in IndexedDB.
 
